@@ -14,7 +14,7 @@ class ProductForecast(BaseModel):
     product_name: str
     product_code: str
     product_category: str
-    method: Literal["prophet", "exponential_smoothing", "no_data"]
+    method: Literal["prophet", "exponential_smoothing", "holt_smoothing", "no_data"]
     forecast_periods: list[WeekForecast]
     total_forecast_qty: float
     data_points: int
@@ -50,7 +50,7 @@ class PurchaseSuggestion(BaseModel):
     customer_count: int
     safety_stock_info: SafetyStockInfo
     abc_xyz: AbcXyzInfo
-    forecast_method: Literal["prophet", "exponential_smoothing", "no_data"]
+    forecast_method: Literal["prophet", "exponential_smoothing", "holt_smoothing", "no_data"]
     forecast_confidence: Literal["high", "medium", "low"]
     status: Literal["sufficient", "order_soon", "deficit"]
     forecast_periods: list[WeekForecast]

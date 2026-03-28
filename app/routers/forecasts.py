@@ -285,7 +285,6 @@ async def forecast_customer(
         result = forecaster.forecast_product(customer_lines, pid, horizon_days=horizon_days)
         forecasts.append(
             ProductForecast(
-                product_id=pid,
                 product_name=meta.get("name", ""),
                 product_code=meta.get("code", ""),
                 product_category=meta.get("category", ""),
