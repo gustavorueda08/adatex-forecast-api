@@ -128,11 +128,13 @@ async def purchase_suggestions(
         client.get_products(),
     )
 
+    # product_meta only contains purchasable products (services and cutItems already
+    # excluded by StrapiClient.get_products via type filters + isLineProduct flag).
     product_meta: dict[int, dict] = {p["id"]: p for p in products}
     forecaster = DemandForecaster()
 
-    # Build per-product structures needed for safety stock + ABC-XYZ
-    product_ids = {l["product_id"] for l in order_lines}
+    # Only forecast products that exist in the purchasable product catalog
+    product_ids = {l["product_id"] for l in order_lines if l["product_id"] in product_meta}
     weekly_demand: dict[int, list[float]] = defaultdict(list)
     monthly_demand: dict[int, list[float]] = defaultdict(list)
     total_revenue: dict[int, float] = defaultdict(float)
@@ -181,14 +183,22 @@ async def purchase_suggestions(
 
         current_stock = round(stock_map.get(pid, 0.0), 2)
         total_fc = forecast["total_forecast_qty"]
+        ss_qty = ss_info["safety_stock"]
+        rop = ss_info["reorder_point"]
+
+        # Deficit = units still needed to cover full forecast (negative = surplus)
         deficit = round(total_fc - current_stock, 2)
 
-        if deficit <= 0:
-            status_val = "sufficient"
-        elif current_stock >= total_fc * 0.5:
+        # Status based on reorder point so it accounts for the full import lead time.
+        # current_stock ≤ safety_stock  → critically low (deficit)
+        # current_stock ≤ reorder_point → below the trigger threshold (order soon)
+        # current_stock >  reorder_point → adequate coverage (sufficient)
+        if current_stock <= ss_qty:
+            status_val = "deficit"
+        elif current_stock <= rop:
             status_val = "order_soon"
         else:
-            status_val = "deficit"
+            status_val = "sufficient"
 
         suggestions.append(
             PurchaseSuggestion(
@@ -310,11 +320,12 @@ async def abc_xyz_analysis(months_back: int = 24) -> list[AbcXyzResult]:
         return cached
 
     order_lines = await _load_order_history(months_back=months_back)
-    product_ids = {l["product_id"] for l in order_lines}
 
     client = StrapiClient()
     products = await client.get_products()
+    # product_meta already excludes services, cutItems and one-off products
     product_meta = {p["id"]: p for p in products}
+    product_ids = {l["product_id"] for l in order_lines if l["product_id"] in product_meta}
 
     revenue_rows = []
     variability_rows = []

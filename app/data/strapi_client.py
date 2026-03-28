@@ -155,10 +155,17 @@ class StrapiClient:
         return lines
 
     async def get_products(self) -> list[dict]:
-        """Return all active products."""
+        """Return all active, purchasable products (excludes services and cut items)."""
         raw = await self._get_all(
             "products",
-            {"filters[isActive][$eq]": "true"},
+            {
+                "filters[isActive][$eq]": "true",
+                # Exclude derived cut-items (ordered via their parent) and services
+                "filters[type][$notIn][0]": "service",
+                "filters[type][$notIn][1]": "cutItem",
+                # Exclude one-off products that are not replenished regularly
+                "filters[isLineProduct][$ne]": "false",
+            },
         )
         return [
             {
@@ -167,6 +174,7 @@ class StrapiClient:
                 "code": p.get("code", ""),
                 "unit": p.get("unit", ""),
                 "category": p.get("category", ""),
+                "type": p.get("type", ""),
             }
             for p in raw
         ]
