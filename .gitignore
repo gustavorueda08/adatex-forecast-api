@@ -8,8 +8,10 @@ env/
 
 # Python bytecode
 __pycache__/
+**/__pycache__/
 *.py[cod]
 *.pyo
+*.pyc
 
 # Distribution / packaging
 dist/
