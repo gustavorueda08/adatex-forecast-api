@@ -46,6 +46,11 @@ class StrapiClient:
                     headers=self._headers,
                     params=params,
                 )
+                if not resp.is_success:
+                    logger.error(
+                        "Strapi %s %s → %d: %s",
+                        path, dict(params), resp.status_code, resp.text[:500],
+                    )
                 resp.raise_for_status()
                 body = resp.json()
 
@@ -86,10 +91,14 @@ class StrapiClient:
                 "filters[type][$in][0]": "sale",
                 "filters[type][$in][1]": "partial-invoice",
                 "filters[state][$in][0]": "completed",
-                "filters[state][$in][1]": "processing",
                 "filters[createdAt][$gte]": cutoff,
-                "populate[orderProducts][populate][product]": "*",
-                "populate[customer]": "*",
+                # Strapi 5: use explicit fields instead of wildcard '*' for named relations
+                "populate[orderProducts][populate][product][fields][0]": "id",
+                "populate[orderProducts][populate][product][fields][1]": "name",
+                "populate[orderProducts][populate][product][fields][2]": "code",
+                "populate[orderProducts][populate][product][fields][3]": "category",
+                "populate[customer][fields][0]": "id",
+                "populate[customer][fields][1]": "name",
             },
         )
 
@@ -119,7 +128,7 @@ class StrapiClient:
                 if not product_id:
                     continue
 
-                qty = float(op.get("requestedQuantity") or 0)
+                qty = float(op.get("confirmedQuantity") or 0)
                 price = float(op.get("price") or 0)
 
                 lines.append(

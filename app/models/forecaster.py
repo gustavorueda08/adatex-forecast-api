@@ -17,7 +17,8 @@ import pandas as pd
 logger = logging.getLogger(__name__)
 
 # Prophet requires at least this many non-zero observations to fit reliably.
-MIN_PROPHET_POINTS = 8
+# 26 weeks ≈ 6 months — enough for one seasonal cycle to be visible.
+MIN_PROPHET_POINTS = 26
 
 
 class DemandForecaster:
@@ -74,6 +75,15 @@ class DemandForecaster:
             .rename(columns={"order_date": "ds", "qty": "y"})
         )
         weekly["y"] = weekly["y"].fillna(0.0).clip(lower=0.0)
+
+        # Cap extreme outliers at median + 4 IQR to prevent single spikes
+        # from skewing the model (e.g. bulk one-time orders).
+        nonzero = weekly.loc[weekly["y"] > 0, "y"]
+        if len(nonzero) >= 4:
+            q1, q3 = nonzero.quantile(0.25), nonzero.quantile(0.75)
+            upper_cap = q3 + 4 * (q3 - q1)
+            weekly["y"] = weekly["y"].clip(upper=upper_cap)
+
         return weekly
 
     def _prophet_forecast(
@@ -143,40 +153,58 @@ class DemandForecaster:
         self, series: pd.DataFrame, product_id: int, n_weeks: int
     ) -> dict:
         """
-        Simple exponential smoothing fallback.
-        α = 0.3 gives moderate weight to recent observations.
-        Confidence bands are ±1.96σ of the residuals.
+        Holt's double exponential smoothing (level + trend) fallback.
+
+        Captures a linear trend that simple SES misses for growing/declining
+        products. α=0.3 weights recent levels; β=0.1 weights trend slowly to
+        avoid over-reacting to noise in sparse data.
+        Confidence bands are ±1.96σ of the one-step-ahead residuals.
         """
         y = series["y"].values.astype(float)
         alpha = 0.3
-        smoothed = y.copy()
-        for i in range(1, len(smoothed)):
-            smoothed[i] = alpha * y[i] + (1 - alpha) * smoothed[i - 1]
+        beta = 0.1
 
-        level = float(smoothed[-1])
-        residuals = y - smoothed
-        std = float(np.std(residuals, ddof=1)) if len(residuals) > 1 else level * 0.3
+        # Initialise level and trend
+        level = y[0]
+        trend = (y[1] - y[0]) if len(y) > 1 else 0.0
+
+        fitted = np.empty_like(y)
+        fitted[0] = level
+        for i in range(1, len(y)):
+            prev_level = level
+            level = alpha * y[i] + (1 - alpha) * (level + trend)
+            trend = beta * (level - prev_level) + (1 - beta) * trend
+            fitted[i] = level + trend
+
+        residuals = y - fitted
+        std = float(np.std(residuals, ddof=1)) if len(residuals) > 1 else abs(level) * 0.3
 
         last_ds = series["ds"].max()
         future_dates = pd.date_range(
             start=last_ds + pd.offsets.Week(1), periods=n_weeks, freq="W-MON"
         )
 
-        periods = [
-            {
-                "week_start": d.strftime("%Y-%m-%d"),
-                "forecast_qty": round(max(0.0, level), 2),
-                "lower_95": round(max(0.0, level - 1.96 * std), 2),
-                "upper_95": round(max(0.0, level + 1.96 * std), 2),
-            }
-            for d in future_dates
-        ]
+        periods = []
+        for step, d in enumerate(future_dates, start=1):
+            forecast_val = max(0.0, level + step * trend)
+            # Uncertainty grows with horizon: widen bands proportional to √step
+            band = 1.96 * std * (step ** 0.5)
+            periods.append(
+                {
+                    "week_start": d.strftime("%Y-%m-%d"),
+                    "forecast_qty": round(forecast_val, 2),
+                    "lower_95": round(max(0.0, forecast_val - band), 2),
+                    "upper_95": round(forecast_val + band, 2),
+                }
+            )
+
+        total = round(sum(p["forecast_qty"] for p in periods), 2)
 
         return {
             "product_id": product_id,
-            "method": "exponential_smoothing",
+            "method": "holt_smoothing",
             "forecast_periods": periods,
-            "total_forecast_qty": round(max(0.0, level) * n_weeks, 2),
+            "total_forecast_qty": total,
             "data_points": len(series),
             "confidence": "low",
         }
