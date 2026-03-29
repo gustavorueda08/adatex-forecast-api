@@ -45,6 +45,9 @@ class PurchaseSuggestion(BaseModel):
     product_category: str
     product_unit: str
     current_stock: float
+    # Stock in confirmed/processing purchase orders (not yet in warehouse)
+    incoming_stock: float = 0.0
+    earliest_arrival: str | None = None   # ISO date of earliest estimatedCompletedDate
     total_forecast_qty: float
     deficit: float
     customer_count: int

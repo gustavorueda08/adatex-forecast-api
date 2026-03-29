@@ -122,10 +122,11 @@ async def purchase_suggestions(
     logger.info("Computing purchase suggestions (horizon=%dd, lead_time=%dd)", horizon_days, lt)
 
     client = StrapiClient()
-    order_lines, stock_map, products = await asyncio.gather(
+    order_lines, stock_map, products, incoming_map = await asyncio.gather(
         client.get_order_history(months_back=months_back),
         client.get_current_stock(),
         client.get_products(),
+        client.get_incoming_purchase_stock(),
     )
 
     # product_meta only contains purchasable products (services and cutItems already
@@ -186,16 +187,22 @@ async def purchase_suggestions(
         ss_qty = ss_info["safety_stock"]
         rop = ss_info["reorder_point"]
 
-        # Deficit = units still needed to cover full forecast (negative = surplus)
-        deficit = round(total_fc - current_stock, 2)
+        # Stock in confirmed/processing purchase orders (in manufacturing or transit)
+        po_info = incoming_map.get(pid, {"qty": 0.0, "earliest_arrival": None})
+        incoming_qty = round(po_info["qty"], 2)
 
-        # Status based on reorder point so it accounts for the full import lead time.
-        # current_stock ≤ safety_stock  → critically low (deficit)
-        # current_stock ≤ reorder_point → below the trigger threshold (order soon)
-        # current_stock >  reorder_point → adequate coverage (sufficient)
-        if current_stock <= ss_qty:
+        # Effective stock = what's in warehouse + what's already on its way
+        effective_stock = round(current_stock + incoming_qty, 2)
+
+        # Deficit = units still needed beyond effective stock to cover full forecast
+        deficit = round(total_fc - effective_stock, 2)
+
+        # Status based on reorder point using effective stock so that open POs
+        # are credited.  An item with a confirmed PO covering the reorder point
+        # correctly shows as "sufficient" even if warehouse stock alone is low.
+        if effective_stock <= ss_qty:
             status_val = "deficit"
-        elif current_stock <= rop:
+        elif effective_stock <= rop:
             status_val = "order_soon"
         else:
             status_val = "sufficient"
@@ -208,6 +215,8 @@ async def purchase_suggestions(
                 product_category=meta.get("category", ""),
                 product_unit=meta.get("unit", ""),
                 current_stock=current_stock,
+                incoming_stock=incoming_qty,
+                earliest_arrival=po_info["earliest_arrival"],
                 total_forecast_qty=total_fc,
                 deficit=deficit,
                 customer_count=customer_count.get(pid, 0),

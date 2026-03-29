@@ -155,16 +155,24 @@ class StrapiClient:
         return lines
 
     async def get_products(self) -> list[dict]:
-        """Return all active, purchasable products (excludes services and cut items)."""
+        """
+        Return all active, purchasable line products.
+
+        Excluded from forecasting:
+        - type=service (no physical stock)
+        - type=cutItem (derived from a parent product, not ordered independently)
+        - isLineProduct=False (one-off imports, not replenished regularly)
+
+        Note: isLineProduct defaults to True in the schema. Existing products
+        without the field set (null) are treated as line products (safe default).
+        """
         raw = await self._get_all(
             "products",
             {
                 "filters[isActive][$eq]": "true",
-                # Exclude derived cut-items (ordered via their parent) and services
+                # Exclude services and cut items at the query level
                 "filters[type][$notIn][0]": "service",
                 "filters[type][$notIn][1]": "cutItem",
-                # Exclude one-off products that are not replenished regularly
-                "filters[isLineProduct][$ne]": "false",
             },
         )
         return [
@@ -177,7 +185,69 @@ class StrapiClient:
                 "type": p.get("type", ""),
             }
             for p in raw
+            # isLineProduct=None (old records without the field) is treated as True.
+            # Only products explicitly set to False are excluded.
+            if p.get("isLineProduct") is not False
         ]
+
+    async def get_incoming_purchase_stock(self) -> dict[int, dict]:
+        """
+        Return stock quantities that are on order but not yet physically in the warehouse.
+
+        Only considers ``purchase`` orders in ``confirmed`` or ``processing`` state —
+        these represent goods being manufactured or in ocean transit.  Items for such
+        orders are created by ``PurchaseInStrategy`` only when the order reaches
+        ``completed``, so they are NOT yet reflected in current_stock.
+
+        Nationalizations and transfers are excluded: their items already exist in
+        the system (free-trade-zone warehouse) and are therefore already counted
+        in get_current_stock().
+
+        Returns
+        -------
+        dict[int, dict]
+            product_id → {
+                "qty": float,              # total incoming units across all open POs
+                "earliest_arrival": str | None,  # ISO date of the soonest estimatedCompletedDate
+            }
+        """
+        raw = await self._get_all(
+            "orders",
+            {
+                "filters[type][$eq]": "purchase",
+                "filters[state][$in][0]": "confirmed",
+                "filters[state][$in][1]": "processing",
+                "populate[orderProducts][populate][product][fields][0]": "id",
+            },
+        )
+
+        incoming: dict[int, dict] = {}
+        for order in raw:
+            estimated_date = order.get("estimatedCompletedDate")  # YYYY-MM-DD string or None
+            for op in order.get("orderProducts") or []:
+                product = op.get("product") or {}
+                pid = product.get("id")
+                if not pid:
+                    continue
+                qty = float(
+                    op.get("confirmedQuantity") or op.get("requestedQuantity") or 0
+                )
+                if qty <= 0:
+                    continue
+
+                if pid not in incoming:
+                    incoming[pid] = {"qty": 0.0, "earliest_arrival": None}
+
+                incoming[pid]["qty"] = round(incoming[pid]["qty"] + qty, 4)
+
+                # Track the earliest estimated arrival across all open POs for this product
+                if estimated_date:
+                    prev = incoming[pid]["earliest_arrival"]
+                    if prev is None or estimated_date < prev:
+                        incoming[pid]["earliest_arrival"] = estimated_date
+
+        logger.info("Fetched incoming purchase stock for %d products", len(incoming))
+        return incoming
 
     async def get_current_stock(self) -> dict[int, float]:
         """
