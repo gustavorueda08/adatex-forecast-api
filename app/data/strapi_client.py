@@ -91,6 +91,8 @@ class StrapiClient:
                 "filters[type][$in][0]": "sale",
                 "filters[type][$in][1]": "partial-invoice",
                 "filters[state][$in][0]": "completed",
+                "filters[state][$in][1]": "confirmed",
+                "filters[state][$in][2]": "processing",
                 "filters[createdAt][$gte]": cutoff,
                 # Strapi 5: use explicit fields instead of wildcard '*' for named relations
                 "populate[orderProducts][populate][product][fields][0]": "id",
@@ -128,7 +130,7 @@ class StrapiClient:
                 if not product_id:
                     continue
 
-                qty = float(op.get("confirmedQuantity") or 0)
+                qty = float(op.get("confirmedQuantity") or op.get("requestedQuantity") or 0)
                 price = float(op.get("price") or 0)
 
                 lines.append(
