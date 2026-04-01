@@ -161,22 +161,18 @@ class StrapiClient:
         Return all active, purchasable line products.
 
         Excluded from forecasting:
+        - isActive=False (deactivated products)
         - type=service (no physical stock)
         - type=cutItem (derived from a parent product, not ordered independently)
         - isLineProduct=False (one-off imports, not replenished regularly)
 
-        Note: isLineProduct defaults to True in the schema. Existing products
-        without the field set (null) are treated as line products (safe default).
+        Filtering is done in Python rather than via Strapi REST query params because
+        Strapi's SQL backend treats NULL comparisons as falsy — products created
+        before these fields were added to the schema have NULL values and would be
+        silently excluded by server-side filters like $eq=true or $notIn=[...].
+        Null values are treated as the schema default (i.e. active, line products).
         """
-        raw = await self._get_all(
-            "products",
-            {
-                "filters[isActive][$eq]": "true",
-                # Exclude services and cut items at the query level
-                "filters[type][$notIn][0]": "service",
-                "filters[type][$notIn][1]": "cutItem",
-            },
-        )
+        raw = await self._get_all("products", {})
         return [
             {
                 "id": p.get("id"),
@@ -187,9 +183,14 @@ class StrapiClient:
                 "type": p.get("type", ""),
             }
             for p in raw
-            # isLineProduct=None (old records without the field) is treated as True.
-            # Only products explicitly set to False are excluded.
-            if p.get("isLineProduct") is not False
+            # For boolean fields, treat None (old records without the field set) as True.
+            # Only records explicitly set to False are excluded.
+            # NOTE: Strapi REST filters ($eq=true, $notIn) use SQL semantics where
+            # NULL comparisons return NULL (falsy), silently dropping legacy records.
+            # Filtering in Python avoids that pitfall.
+            if p.get("isActive") is not False
+            and p.get("type") not in ("service", "cutItem")
+            and p.get("isLineProduct") is not False
         ]
 
     async def get_incoming_purchase_stock(self) -> dict[int, dict]:
