@@ -94,7 +94,11 @@ class DemandForecaster:
         try:
             from prophet import Prophet  # lazy import — Prophet takes ~1 s to import
         except ImportError:
-            logger.error("prophet package not installed. Run: pip install prophet")
+            logger.error(
+                "prophet package not installed — falling back to Holt smoothing for "
+                "product %s. Run: pip install prophet (or conda install -c conda-forge prophet)",
+                product_id,
+            )
             return self._exp_smoothing_forecast(series, product_id, n_weeks)
 
         try:
@@ -171,23 +175,41 @@ class DemandForecaster:
         Holt's double exponential smoothing (level + trend) fallback.
 
         Captures a linear trend that simple SES misses for growing/declining
-        products. α=0.3 weights recent levels; β=0.1 weights trend slowly to
+        products. α=0.3 weights recent levels; β=0.05 weights trend slowly to
         avoid over-reacting to noise in sparse data.
         Confidence bands are ±1.96σ of the one-step-ahead residuals.
         """
         y = series["y"].values.astype(float)
-        alpha = 0.3
-        beta = 0.1
+        nonzero_vals = y[y > 0]
 
-        # Initialise level and trend
-        level = y[0]
-        trend = (y[1] - y[0]) if len(y) > 1 else 0.0
+        if len(nonzero_vals) == 0:
+            return self._empty_result(product_id)
+
+        alpha = 0.3
+        beta = 0.05  # Slower trend adaptation — reduces oscillation on sparse data
+
+        # Initialize level from the mean of the first few non-zero observations
+        # rather than y[0] (which is often 0 for sparse/intermittent demand, causing
+        # the model to start too low and produce near-zero forecasts).
+        level = float(nonzero_vals[: min(4, len(nonzero_vals))].mean())
+        trend = 0.0
+
+        # Floor: forecasts can't fall below 10% of the historical non-zero weekly
+        # mean.  This prevents trailing zero-weeks from collapsing the forecast to 0
+        # for products with regular but infrequent orders.
+        nonzero_mean = float(nonzero_vals.mean())
+        floor = nonzero_mean * 0.10
 
         fitted = np.empty_like(y)
         fitted[0] = level
         for i in range(1, len(y)):
             prev_level = level
-            level = alpha * y[i] + (1 - alpha) * (level + trend)
+            # Clip the projected value to ≥ 0 before mixing with y[i].
+            # Without this clip, many consecutive zero-weeks drive level+trend
+            # negative, which causes ALL future predictions to clip to 0 via
+            # max(0, …) in the output loop.
+            projected = max(0.0, level + trend)
+            level = alpha * y[i] + (1 - alpha) * projected
             trend = beta * (level - prev_level) + (1 - beta) * trend
             fitted[i] = level + trend
 
@@ -201,7 +223,7 @@ class DemandForecaster:
 
         periods = []
         for step, d in enumerate(future_dates, start=1):
-            forecast_val = max(0.0, level + step * trend)
+            forecast_val = max(floor, level + step * trend)
             # Uncertainty grows with horizon: widen bands proportional to √step
             band = 1.96 * std * (step ** 0.5)
             periods.append(
