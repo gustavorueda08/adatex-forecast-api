@@ -76,12 +76,14 @@ class DemandForecaster:
         )
         weekly["y"] = weekly["y"].fillna(0.0).clip(lower=0.0)
 
-        # Cap extreme outliers at median + 4 IQR to prevent single spikes
-        # from skewing the model (e.g. bulk one-time orders).
+        # Cap extreme outliers to prevent single spikes from skewing the model.
+        # Use Q3 + 2.5*IQR but never more than 3× the 90th percentile,
+        # so that sparse data (Q1≈0, large IQR) doesn't produce absurd caps.
         nonzero = weekly.loc[weekly["y"] > 0, "y"]
         if len(nonzero) >= 4:
             q1, q3 = nonzero.quantile(0.25), nonzero.quantile(0.75)
-            upper_cap = q3 + 4 * (q3 - q1)
+            p90 = nonzero.quantile(0.90)
+            upper_cap = min(q3 + 2.5 * (q3 - q1), p90 * 3.0)
             weekly["y"] = weekly["y"].clip(upper=upper_cap)
 
         return weekly
@@ -100,25 +102,38 @@ class DemandForecaster:
                 yearly_seasonality=True,
                 weekly_seasonality=False,
                 daily_seasonality=False,
-                # Multiplicative mode handles products whose variance grows with demand
-                seasonality_mode="multiplicative",
+                # Additive mode: seasonal component adds a fixed quantity on top of
+                # the trend rather than multiplying it.  Multiplicative mode was
+                # causing runaway forecasts for products with sparse demand and
+                # occasional large orders (Prophet learned high seasonal multipliers
+                # and amplified them by any recent upward trend).
+                seasonality_mode="additive",
                 interval_width=0.95,
                 # Conservative changepoint prior — avoids over-fitting on 1-2 years of data
                 changepoint_prior_scale=0.05,
                 # Reduce noise from outlier weeks
                 mcmc_samples=0,  # use MAP estimation (faster)
             )
-            # Monthly seasonality (period = 30.5 days, 5 Fourier terms)
-            m.add_seasonality(name="monthly", period=30.5, fourier_order=5)
+            # Monthly seasonality (period = 30.5 days, 3 Fourier terms).
+            # fourier_order=3 (6 params) is sufficient for monthly cycles and
+            # reduces overfitting risk on sparse data (was 5 = 10 params).
+            m.add_seasonality(name="monthly", period=30.5, fourier_order=3)
 
             m.fit(series)
             future = m.make_future_dataframe(periods=n_weeks, freq="W")
             forecast = m.predict(future)
 
             future_fc = forecast[forecast["ds"] > series["ds"].max()].copy()
+
+            # Safety cap: never forecast more than 3× the historical weekly maximum.
+            # This prevents model misbehaviour (e.g. extrapolated trends or wrong
+            # seasonal fits) from producing physically impossible numbers.
+            weekly_max = float(series["y"].max()) if not series.empty else 0.0
+            fc_cap = max(weekly_max * 3.0, 1.0)
+
             future_fc[["yhat", "yhat_lower", "yhat_upper"]] = future_fc[
                 ["yhat", "yhat_lower", "yhat_upper"]
-            ].clip(lower=0.0)
+            ].clip(lower=0.0, upper=fc_cap)
 
             periods = [
                 {
